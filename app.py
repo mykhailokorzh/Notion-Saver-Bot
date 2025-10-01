@@ -1,10 +1,8 @@
-
 import os
 from datetime import datetime, timezone
-from dotenv import load_dotenv
-from notion_client import Client
 
-from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from notion_client import Client
+from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -15,20 +13,24 @@ from telegram.ext import (
 )
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
-NOTION_TOKEN   = os.environ["NOTION_TOKEN"]
-NOTION_DB_ID   = os.environ["NOTION_DB_ID"]
+NOTION_TOKEN = os.environ["NOTION_TOKEN"]
+NOTION_DB_ID = os.environ["NOTION_DB_ID"]
+
+PUBLIC_URL = os.environ.get("PUBLIC_URL")
+PORT = int(os.environ.get("PORT", "8000"))
 
 notion = Client(auth=NOTION_TOKEN)
 
+
+# -------- Notion helper ----------
 def create_task_in_notion(
-    title: str,
-    description: str | None = None,
-    status: str | None = None,
-    due_date: str | None = None,
-    priority: str | None = None,
-    task_types: list[str] | None = None,
+        title: str,
+        description: str | None = None,
+        status: str | None = None,
+        due_date: str | None = None,
+        priority: str | None = None,
+        task_types: list[str] | None = None,
 ):
-    """Створює сторінку в базі Notion 'Tasks Tracker' з коректними типами полів."""
     props: dict = {
         "Task name": {"title": [{"text": {"content": title[:200] or "New task from Telegram"}}]},
         "Updated at": {"date": {"start": datetime.now(timezone.utc).isoformat()}},
@@ -45,9 +47,14 @@ def create_task_in_notion(
         props["Task type"] = {"multi_select": [{"name": t} for t in task_types]}
     notion.pages.create(parent={"database_id": NOTION_DB_ID}, properties=props)
 
+
+# -------- Conversation states ----------
 TITLE, DESCRIPTION = range(2)
 
+from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove
+
 NEW_BTN_KB = ReplyKeyboardMarkup([["/new"]], resize_keyboard=True)
+
 
 async def start(update: Update, _: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -56,6 +63,7 @@ async def start(update: Update, _: ContextTypes.DEFAULT_TYPE):
         reply_markup=NEW_BTN_KB
     )
 
+
 async def new_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Введи *назву задачі* (або /cancel щоб скасувати):",
@@ -63,6 +71,7 @@ async def new_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=ReplyKeyboardRemove(),
     )
     return TITLE
+
 
 async def ask_description(update: Update, context: ContextTypes.DEFAULT_TYPE):
     title = (update.message.text or "").strip()
@@ -80,6 +89,7 @@ async def ask_description(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
     return DESCRIPTION
+
 
 async def finalize_create(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw = update.message.text or ""
@@ -101,11 +111,13 @@ async def finalize_create(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     return ConversationHandler.END
 
+
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     await update.message.reply_text("🚫 Скасовано. Нічого не створюю.", reply_markup=NEW_BTN_KB)
     await update.message.reply_text("Щоб додати новий запис, натисни /new.", reply_markup=NEW_BTN_KB)
     return ConversationHandler.END
+
 
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
@@ -120,12 +132,27 @@ def main():
         name="create_task_flow",
         persistent=False,
     )
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(conv)
     app.add_handler(CommandHandler("cancel", cancel))
 
-    app.run_polling()
+    if PUBLIC_URL:
+        print("Starting in WEBHOOK mode")
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=TELEGRAM_TOKEN,
+            webhook_url=f"{PUBLIC_URL}/{TELEGRAM_TOKEN}",
+            drop_pending_updates=True,
+            allowed_updates=Update.ALL_TYPES,
+        )
+    else:
+        print("Starting in POLLING mode")
+        app.run_polling(
+            drop_pending_updates=True,
+            allowed_updates=Update.ALL_TYPES,
+        )
+
 
 if __name__ == "__main__":
     main()
