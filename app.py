@@ -2,7 +2,7 @@ import os
 from datetime import datetime, timezone
 
 from notion_client import Client
-from telegram import Update
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -18,6 +18,13 @@ NOTION_DB_ID = os.environ["NOTION_DB_ID"]
 
 PUBLIC_URL = os.environ.get("PUBLIC_URL")
 PORT = int(os.environ.get("PORT", "8000"))
+
+ALLOWED_USER_IDS = {
+    int(x) for x in os.environ.get("ALLOWED_USER_IDS", "").replace(" ", "").split(",") if x
+}
+ONLY_PRIVATE = filters.ChatType.PRIVATE
+ONLY_ALLOWED = (filters.User(user_id=list(ALLOWED_USER_IDS))
+                if ALLOWED_USER_IDS else filters.ALL)
 
 notion = Client(auth=NOTION_TOKEN)
 
@@ -48,10 +55,7 @@ def create_task_in_notion(
     notion.pages.create(parent={"database_id": NOTION_DB_ID}, properties=props)
 
 
-# -------- Conversation states ----------
 TITLE, DESCRIPTION = range(2)
-
-from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove
 
 NEW_BTN_KB = ReplyKeyboardMarkup([["/new"]], resize_keyboard=True)
 
@@ -94,9 +98,7 @@ async def ask_description(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def finalize_create(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw = update.message.text or ""
     txt = raw.strip()
-
     description = None if (txt.lower() == "skip" or len(txt) == 1) else (txt or None)
-
     title = context.user_data.get("title", "New task from Telegram")
 
     try:
@@ -119,22 +121,32 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+async def not_allowed(update: Update, _: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("⛔️ Доступ заборонено.")
+
+
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
+    private_allowed = ONLY_PRIVATE & ONLY_ALLOWED
+
     conv = ConversationHandler(
-        entry_points=[CommandHandler("new", new_task)],
+        entry_points=[CommandHandler("new", new_task, filters=private_allowed)],
         states={
-            TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_description)],
-            DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, finalize_create)],
+            TITLE: [MessageHandler(private_allowed & ~filters.COMMAND, ask_description)],
+            DESCRIPTION: [MessageHandler(private_allowed & ~filters.COMMAND, finalize_create)],
         },
-        fallbacks=[CommandHandler("cancel", cancel)],
+        fallbacks=[CommandHandler("cancel", cancel, filters=private_allowed)],
         name="create_task_flow",
         persistent=False,
     )
-    app.add_handler(CommandHandler("start", start))
+
+    app.add_handler(CommandHandler("start", start, filters=private_allowed))
     app.add_handler(conv)
-    app.add_handler(CommandHandler("cancel", cancel))
+    app.add_handler(CommandHandler("cancel", cancel, filters=private_allowed))
+
+    if ALLOWED_USER_IDS:
+        app.add_handler(MessageHandler(ONLY_PRIVATE & ~ONLY_ALLOWED, not_allowed))
 
     if PUBLIC_URL:
         print("Starting in WEBHOOK mode")
